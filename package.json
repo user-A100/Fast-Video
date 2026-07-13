@@ -1,0 +1,13 @@
+{
+  "name": "fast-video",
+  "version": "2.0.1",
+  "private": true,
+  "description": "Bilibili-friendly video speed controller extension",
+  "scripts": {
+    "test": "node tests/smoke.mjs",
+    "test:visual": "node tests/popup-visual.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.61.1"
+  }
+}
