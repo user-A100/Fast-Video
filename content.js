@@ -5,12 +5,16 @@
   const BILI_SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 8, 16];
   const MIN_SPEED = 0.25;
   const MAX_SPEED = 16;
+  const YUKETANG_NATIVE_MAX = 3.5;
+  const CONTROL_EVENT = "fast-video:set-playback-guard";
   const hostname = location.hostname;
   const isBilibili = hostname === "bilibili.com" || hostname.endsWith(".bilibili.com");
+  const isYuketang = hostname === "yuketang.cn" || hostname.endsWith(".yuketang.cn");
 
   class SpeedController {
     constructor() {
       this.currentSpeed = 1;
+      this.yuketangFrame = isYuketang;
       this.lockedSpeed = null;
       this.siteSpeeds = {};
       this.videos = new Set();
@@ -20,11 +24,11 @@
       this.videoIdentity = isBilibili ? this.getBilibiliVideoIdentity() : null;
       this.pendingBiliReset = isBilibili;
       this.domObserver = null;
-      this.init();
+      this.init().catch(() => {});
     }
 
     async init() {
-      const result = await chrome.storage.sync.get(["siteSpeeds"]);
+      const result = await this.getSyncStorage(["siteSpeeds"]);
       this.siteSpeeds = result.siteSpeeds || {};
       this.lockedSpeed = isBilibili ? null : this.normaliseSpeed(this.siteSpeeds[hostname]);
       if (this.lockedSpeed !== null) this.currentSpeed = this.lockedSpeed;
@@ -33,10 +37,44 @@
       this.scan();
       this.observeDom();
       this.listenForMessages();
+      this.syncPlaybackGuard();
 
       if (isBilibili) {
         this.enhanceBilibiliMenus();
         this.navigationTimer = setInterval(() => this.checkBilibiliNavigation(), 500);
+      } else if (isYuketang) {
+        this.activateYuketangMode();
+        this.sendRuntimeMessage({ action: "broadcastYuketangSpeed", speed: this.currentSpeed });
+      } else if (window.top !== window) {
+        const tabMode = await this.sendRuntimeMessage({ action: "getYuketangTabSpeed" });
+        if (tabMode?.active) this.activateYuketangMode(tabMode.speed);
+      } else {
+        this.sendRuntimeMessage({ action: "clearYuketangTab" });
+      }
+    }
+
+    async getSyncStorage(keys) {
+      try {
+        return await chrome.storage.sync.get(keys);
+      } catch {
+        return {};
+      }
+    }
+
+    async setSyncStorage(value) {
+      try {
+        await chrome.storage.sync.set(value);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    async sendRuntimeMessage(message) {
+      try {
+        return await chrome.runtime.sendMessage(message);
+      } catch {
+        return null;
       }
     }
 
@@ -47,6 +85,28 @@
 
     formatSpeed(speed) {
       return `${Number(speed.toFixed(2))}×`;
+    }
+
+    shouldEnforceSpeed() {
+      return !isBilibili && (this.yuketangFrame || this.lockedSpeed !== null);
+    }
+
+    enforcedSpeed() {
+      return this.lockedSpeed ?? this.currentSpeed;
+    }
+
+    nativeSpeed(speed = this.enforcedSpeed()) {
+      return this.yuketangFrame && speed > YUKETANG_NATIVE_MAX ? YUKETANG_NATIVE_MAX : speed;
+    }
+
+    syncPlaybackGuard() {
+      document.dispatchEvent(new CustomEvent(CONTROL_EVENT, {
+        detail: {
+          enabled: this.shouldEnforceSpeed(),
+          speed: this.nativeSpeed(),
+          aggressive: this.yuketangFrame
+        }
+      }));
     }
 
     getMediaElements(root = document) {
@@ -76,8 +136,8 @@
       if (isBilibili) {
         this.setVideoSpeed(video, this.pendingBiliReset ? 1 : this.currentSpeed);
         this.pendingBiliReset = false;
-      } else if (this.lockedSpeed !== null) {
-        this.setVideoSpeed(video, this.lockedSpeed);
+      } else if (this.shouldEnforceSpeed()) {
+        this.setVideoSpeed(video, this.nativeSpeed());
       } else if (Number.isFinite(video.playbackRate)) {
         this.currentSpeed = video.playbackRate;
       }
@@ -88,8 +148,13 @@
           return;
         }
 
-        if (this.lockedSpeed !== null && !isBilibili && video.playbackRate !== this.lockedSpeed) {
-          this.setVideoSpeed(video, this.lockedSpeed);
+        if (this.shouldEnforceSpeed() && video.playbackRate !== this.nativeSpeed()) {
+          this.setVideoSpeed(video, this.nativeSpeed());
+          return;
+        }
+
+        if (this.yuketangFrame) {
+          this.reportSpeed();
           return;
         }
 
@@ -99,25 +164,26 @@
       }, true);
 
       video.addEventListener("loadedmetadata", () => {
-        if (this.lockedSpeed !== null && !isBilibili) {
-          this.setVideoSpeed(video, this.lockedSpeed);
+        if (this.shouldEnforceSpeed()) {
+          this.setVideoSpeed(video, this.nativeSpeed());
         } else if (isBilibili) {
           this.setVideoSpeed(video, this.currentSpeed);
         }
       }, true);
 
       video.addEventListener("play", () => {
-        if (this.lockedSpeed !== null && !isBilibili) this.setVideoSpeed(video, this.lockedSpeed);
+        if (this.shouldEnforceSpeed()) this.setVideoSpeed(video, this.nativeSpeed());
       }, true);
 
       this.reportSpeed();
     }
 
     setVideoSpeed(video, speed) {
-      if (!video || video.playbackRate === speed) return;
+      const appliedSpeed = this.nativeSpeed(speed);
+      if (!video || video.playbackRate === appliedSpeed) return;
       this.programmaticVideos.add(video);
-      if ("defaultPlaybackRate" in video) video.defaultPlaybackRate = speed;
-      video.playbackRate = speed;
+      if ("defaultPlaybackRate" in video) video.defaultPlaybackRate = appliedSpeed;
+      video.playbackRate = appliedSpeed;
     }
 
     applyToAllMedia(speed) {
@@ -158,19 +224,35 @@
     setSpeedOnce(speed, broadcast = true) {
       const validSpeed = this.normaliseSpeed(speed);
       if (validSpeed === null) return false;
+      if (this.yuketangFrame && validSpeed > YUKETANG_NATIVE_MAX) return false;
       this.currentSpeed = validSpeed;
+      this.syncPlaybackGuard();
       if (isBilibili) {
         this.syncNativeBilibiliOption(validSpeed);
         this.settleBilibiliSpeed(validSpeed);
         if (broadcast) {
-          chrome.runtime.sendMessage({ action: "broadcastSpeed", speed: validSpeed }).catch(() => {});
+          this.sendRuntimeMessage({ action: "broadcastSpeed", speed: validSpeed });
         }
       } else {
         this.applyToAllMedia(validSpeed);
       }
       this.updateBilibiliMenuState();
       this.reportSpeed();
+      if (isYuketang && broadcast) {
+        this.sendRuntimeMessage({ action: "broadcastYuketangSpeed", speed: validSpeed });
+      }
       return true;
+    }
+
+    activateYuketangMode(speed = null) {
+      this.yuketangFrame = true;
+      const validSpeed = speed === null ? null : this.normaliseSpeed(speed);
+      const supportedSpeed = validSpeed === null ? null : Math.min(validSpeed, YUKETANG_NATIVE_MAX);
+      if (supportedSpeed !== null) this.currentSpeed = supportedSpeed;
+      this.injectStyles();
+      this.syncPlaybackGuard();
+      this.scan();
+      if (supportedSpeed !== null) this.applyToAllMedia(supportedSpeed);
     }
 
     async setSiteLock(speed) {
@@ -186,7 +268,8 @@
         this.lockedSpeed = validSpeed;
         this.setSpeedOnce(validSpeed);
       }
-      await chrome.storage.sync.set({ siteSpeeds: this.siteSpeeds });
+      await this.setSyncStorage({ siteSpeeds: this.siteSpeeds });
+      this.syncPlaybackGuard();
       return { success: true, lockedSpeed: this.lockedSpeed };
     }
 
@@ -365,20 +448,23 @@
         speed: this.currentSpeed,
         hostname,
         isBilibili,
+        isYuketang: this.yuketangFrame,
+        enforcedByCompatibility: this.yuketangFrame,
         lockedSpeed: this.lockedSpeed
       };
     }
 
     reportSpeed() {
-      chrome.runtime.sendMessage({
+      this.sendRuntimeMessage({
         action: "speedChanged",
         speed: this.currentSpeed,
         isBilibili
-      }).catch(() => {});
+      });
     }
 
     listenForMessages() {
-      chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      try {
+        chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         if (message.action === "getState") {
           sendResponse(this.getState());
           return;
@@ -389,6 +475,11 @@
         }
         if (message.action === "applyBroadcastSpeed") {
           sendResponse({ success: this.setSpeedOnce(message.speed, false), ...this.getState() });
+          return;
+        }
+        if (message.action === "applyYuketangSpeed") {
+          this.activateYuketangMode(message.speed);
+          sendResponse({ success: true, ...this.getState() });
           return;
         }
         if (message.action === "syncDisplayedSpeed") {
@@ -404,7 +495,8 @@
           this.setSiteLock(message.speed).then(sendResponse);
           return true;
         }
-      });
+        });
+      } catch {}
     }
   }
 

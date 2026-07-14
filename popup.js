@@ -1,5 +1,5 @@
 const QUICK_SPEEDS = [0.5, 1, 1.5, 2, 2.5, 3, 4, 8];
-let state = { speed: 1, hostname: "", isBilibili: false, lockedSpeed: null };
+let state = { speed: 1, hostname: "", isBilibili: false, isYuketang: false, lockedSpeed: null };
 let activeTabId = null;
 
 function formatSpeed(speed) {
@@ -9,12 +9,12 @@ function formatSpeed(speed) {
 async function send(message) {
   if (activeTabId === null) return null;
   try {
-    return await chrome.tabs.sendMessage(activeTabId, message);
+    return await chrome.tabs.sendMessage(activeTabId, message, { frameId: 0 });
   } catch (error) {
-    if (!/Receiving end does not exist|Could not establish connection/i.test(error.message)) throw error;
-    await chrome.scripting.executeScript({ target: { tabId: activeTabId }, files: ["content.js"] });
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    return chrome.tabs.sendMessage(activeTabId, message);
+    if (/Receiving end does not exist|Could not establish connection|Extension context invalidated/i.test(error.message)) {
+      throw new Error("扩展刚刚更新，请刷新当前页面后重试");
+    }
+    throw error;
   }
 }
 
@@ -24,11 +24,13 @@ function render() {
 
   const status = document.getElementById("status");
   const locked = state.lockedSpeed !== null;
-  status.textContent = state.isBilibili ? "播放器控制" : locked ? "已锁定" : "自由调速";
-  status.classList.toggle("locked", locked);
+  status.textContent = state.isYuketang ? "雨课堂兼容" : state.isBilibili ? "播放器控制" : locked ? "已锁定" : "自由调速";
+  status.classList.toggle("locked", locked || state.isYuketang);
 
   document.querySelectorAll("[data-speed]").forEach((button) => {
     button.classList.toggle("active", Number(button.dataset.speed) === state.speed);
+    button.disabled = state.isYuketang && Number(button.dataset.speed) > 3.5;
+    button.title = button.disabled ? "雨课堂当前最多支持 3.5×" : "";
   });
 
   const lockButton = document.getElementById("lock-button");
@@ -42,12 +44,16 @@ function render() {
     lockButton.disabled = false;
     lockButton.textContent = "解除锁定";
     lockButton.classList.add("danger");
-    lockHelp.textContent = `持续固定为 ${formatSpeed(state.lockedSpeed)}。`;
+    lockHelp.textContent = state.isYuketang
+      ? `已阻止播放器强制改回速度，并持续固定为 ${formatSpeed(state.lockedSpeed)}。`
+      : `持续固定为 ${formatSpeed(state.lockedSpeed)}。`;
   } else {
     lockButton.disabled = false;
     lockButton.textContent = "锁定当前速度";
     lockButton.classList.remove("danger");
-    lockHelp.textContent = "只有明确锁定后，插件才会持续固定速度。";
+    lockHelp.textContent = state.isYuketang
+      ? "已阻止播放器强制改回速度；锁定后可跨页面记住。"
+      : "只有明确锁定后，插件才会持续固定速度。";
   }
 }
 
@@ -83,8 +89,9 @@ async function init() {
     const input = document.getElementById("custom-speed");
     const error = document.getElementById("error");
     const speed = Number(input.value);
-    if (!Number.isFinite(speed) || speed < 0.25 || speed > 16) {
-      error.textContent = "请输入 0.25–16 之间的倍速";
+    const maxSpeed = state.isYuketang ? 3.5 : 16;
+    if (!Number.isFinite(speed) || speed < 0.25 || speed > maxSpeed) {
+      error.textContent = state.isYuketang ? "雨课堂当前最多支持 3.5×" : "请输入 0.25–16 之间的倍速";
       input.focus();
       return;
     }

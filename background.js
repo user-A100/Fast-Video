@@ -1,4 +1,5 @@
 const tabSpeeds = new Map();
+const yuketangTabSpeeds = new Map();
 
 function paintBadge(tabId, speed) {
   if (!Number.isFinite(speed)) return;
@@ -10,12 +11,31 @@ function paintBadge(tabId, speed) {
   });
 }
 
-chrome.runtime.onMessage.addListener((message, sender) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!sender.tab) return;
+
+  if (message.action === "getYuketangTabSpeed") {
+    sendResponse({ active: yuketangTabSpeeds.has(sender.tab.id), speed: yuketangTabSpeeds.get(sender.tab.id) ?? 1 });
+    return;
+  }
+
+  if (message.action === "clearYuketangTab") {
+    yuketangTabSpeeds.delete(sender.tab.id);
+    return;
+  }
 
   if (message.action === "broadcastSpeed") {
     chrome.tabs.sendMessage(sender.tab.id, {
       action: "applyBroadcastSpeed",
+      speed: message.speed
+    }).catch(() => {});
+    return;
+  }
+
+  if (message.action === "broadcastYuketangSpeed") {
+    yuketangTabSpeeds.set(sender.tab.id, message.speed);
+    chrome.tabs.sendMessage(sender.tab.id, {
+      action: "applyYuketangSpeed",
       speed: message.speed
     }).catch(() => {});
     return;
@@ -36,4 +56,7 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
   if (tabSpeeds.has(tabId)) paintBadge(tabId, tabSpeeds.get(tabId));
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => tabSpeeds.delete(tabId));
+chrome.tabs.onRemoved.addListener((tabId) => {
+  tabSpeeds.delete(tabId);
+  yuketangTabSpeeds.delete(tabId);
+});
