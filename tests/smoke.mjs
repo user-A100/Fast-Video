@@ -4,6 +4,7 @@ import { chromium } from "playwright";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const contentScript = path.join(root, "content.js");
+const mainWorldScript = path.join(root, "main-world.js");
 
 async function makePage(browser, url, storedSiteSpeeds = {}) {
   const page = await browser.newPage();
@@ -36,6 +37,11 @@ async function makePage(browser, url, storedSiteSpeeds = {}) {
     }
   });
   await page.goto(url, { waitUntil: "domcontentloaded" });
+  await page.evaluate(() => {
+    globalThis.__nativePlaybackRate = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "playbackRate");
+    globalThis.__nativeDefaultPlaybackRate = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "defaultPlaybackRate");
+  });
+  await page.addScriptTag({ path: mainWorldScript });
   return page;
 }
 
@@ -104,9 +110,44 @@ try {
   if (await generic.locator("video").evaluate((video) => video.playbackRate) !== 3) {
     throw new Error("普通网站锁定后没有恢复固定倍速");
   }
+  const invalidationErrors = [];
+  generic.on("pageerror", (error) => invalidationErrors.push(error.message));
+  await generic.evaluate(() => {
+    chrome.runtime.sendMessage = () => { throw new Error("Extension context invalidated."); };
+    document.querySelector("video").dispatchEvent(new Event("ratechange"));
+  });
+  await generic.waitForTimeout(30);
+  if (invalidationErrors.some((message) => /Extension context invalidated/i.test(message))) {
+    throw new Error("扩展重新加载后仍抛出上下文失效错误");
+  }
   await generic.close();
 
-  console.log("Smoke tests passed: Bilibili menu/custom/native control and generic explicit lock.");
+  const yuketang = await makePage(browser, "https://pro.yuketang.cn/v2/web/xcloud/video-student/test");
+  await yuketang.setContent("<video></video>");
+  await yuketang.addScriptTag({ path: contentScript });
+  await yuketang.waitForTimeout(30);
+  const supportedState = await yuketang.evaluate(() => __sendToContent({ action: "setSpeed", speed: 3.5 }));
+  if (!supportedState?.success || supportedState.speed !== 3.5) throw new Error("雨课堂 3.5× 设置失败");
+  const supportedRate = await yuketang.locator("video").evaluate((video) => __nativePlaybackRate.get.call(video));
+  if (supportedRate !== 3.5) throw new Error(`雨课堂真实速率不是 3.5×：${supportedRate}`);
+
+  const rejectedState = await yuketang.evaluate(() => __sendToContent({ action: "setSpeed", speed: 4 }));
+  if (rejectedState?.success !== false || rejectedState.speed !== 3.5) throw new Error("雨课堂不应接受 4×");
+  await yuketang.locator("video").evaluate((video) => { __nativePlaybackRate.set.call(video, 1); });
+  await yuketang.waitForTimeout(160);
+  const restoredRate = await yuketang.locator("video").evaluate((video) => __nativePlaybackRate.get.call(video));
+  if (restoredRate !== 3.5) throw new Error(`雨课堂强制回写后未恢复 3.5×：${restoredRate}`);
+  await yuketang.close();
+
+  const embeddedPlayer = await makePage(browser, "https://player.example.com/embed/lesson");
+  await embeddedPlayer.setContent("<video></video>");
+  await embeddedPlayer.addScriptTag({ path: contentScript });
+  await embeddedPlayer.evaluate(() => __sendToContent({ action: "applyYuketangSpeed", speed: 4 }));
+  await embeddedPlayer.waitForTimeout(30);
+  const embeddedRate = await embeddedPlayer.locator("video").evaluate((video) => __nativePlaybackRate.get.call(video));
+  if (embeddedRate !== 3.5) throw new Error(`第三方 iframe 未限制到 3.5×：${embeddedRate}`);
+  await embeddedPlayer.close();
+  console.log("Smoke tests passed: Bilibili, generic lock, and Yuketang write-back guard.");
 } finally {
   await browser.close();
 }

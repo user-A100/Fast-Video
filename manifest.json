@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "倍速播放控制器・B站改良版",
-  "version": "2.0.1",
-  "description": "允许网页原生倍速控制，并把高倍速与自定义倍速集成到哔哩哔哩播放器菜单。",
+  "version": "2.2.2",
+  "description": "允许网页原生倍速控制，并兼容会强制重置速度的雨课堂播放器。",
   "permissions": ["activeTab", "storage", "scripting"],
   "host_permissions": ["<all_urls>"],
   "action": {
@@ -19,6 +19,14 @@
     "service_worker": "background.js"
   },
   "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["main-world.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "world": "MAIN"
+    },
     {
       "matches": ["<all_urls>"],
       "js": ["content.js"],

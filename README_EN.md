@@ -15,8 +15,16 @@ On Bilibili, Fast Video adds higher speeds and a custom-speed input directly to 
 - Resets to `1×` when a new video is opened or the page is refreshed.
 - Never locks Bilibili's player to a fixed speed—the player menu remains in control.
 - On other websites, speed changes are applied once by default. Continuous enforcement is enabled only when you explicitly lock the site.
+- Yuketang compatibility mode is currently stable up to `3.5×`.
 
 > Live streams are not supported. Their players generally try to stay close to real time, so high-speed playback is unreliable.
+
+### Yuketang limitations
+
+- The highest currently supported stable speed is `3.5×`.
+- `4×` and higher are not supported; those choices are disabled in the extension popup.
+- Fast Video does not replace Yuketang's native speed button. Use the extension popup to change speed.
+- Fully reload the course page after updating the extension; an already-open page cannot reuse an invalidated extension context.
 
 ## Installation
 
